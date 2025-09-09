@@ -1,8 +1,7 @@
 #include <assert.h>
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
+
 #define Z_UTILS_IMPLEMENTATION
 #include "zutils.h"
 
@@ -22,6 +21,10 @@ typedef struct {
     size_t count;
     size_t capacity;
 } Bucket;
+
+typedef struct {
+    Bucket items[TABLE_SIZE];
+} HashTable;
 
 typedef struct {
     char *items;
@@ -52,9 +55,13 @@ size_t table_index(const char *str, const size_t len) {
 
 static int num_cities = 0;
 
-void add(Bucket *hash_table, const char *key, const size_t len, const int value) {
+Bucket *get_bucket(HashTable *hash_table, const char *key, const size_t len) {
     const size_t index = table_index(key, len);
-    Bucket *s = &hash_table[index];
+    return &hash_table->items[index];
+}
+
+void add(HashTable *hash_table, const char *key, const size_t len, const int value) {
+    Bucket *s = get_bucket(hash_table, key, len);
     for (City *it = s->items; it < s->items + s->count; ++it) {
         if (strncmp(it->key, key, len) == 0) {
             if (it->min > value) {
@@ -68,14 +75,9 @@ void add(Bucket *hash_table, const char *key, const size_t len, const int value)
             return;
         }
     }
-    char *tmp = strndup(key, len);
-    City *new = malloc(sizeof(City));
-    new->count = 1;
-    new->key = tmp;
-    new->min = value;
-    new->max = value;
-    new->mean = value;
-    z_da_append(s, *new);
+
+    const City new = {.key = strndup(key, len), .count = 1, .min = value, .max = value, .mean = value};
+    z_da_append(s, new);
 }
 
 void join_entry(Bucket *hash_table, const City *src) {
@@ -92,32 +94,30 @@ void join_entry(Bucket *hash_table, const City *src) {
                 it->max = src->max;
             }
             it->mean += src->mean;
-            it->count+= src->count;
+            it->count += src->count;
             return;
         }
     }
     num_cities++;
-    char *tmp = strdup(key);
-    City *new = malloc(sizeof(City));
-    new->count = src->count;
-    new->key = tmp;
-    new->min = src->min;
-    new->max = src->max;
-    new->mean = src->mean;
-    z_da_append(s, *new);
+    const City new = {.key = strdup(key), .count = src->count, .min = src->min, .max = src->max, .mean = src->mean};
+    z_da_append(s, new);
 }
 
-Bucket* join_tables(Bucket** tables, const size_t count) {
+Bucket *join_tables(HashTable **tables, const size_t count) {
     Bucket *result = calloc(TABLE_SIZE, sizeof(Bucket));
     for (size_t i = 0; i < count; i++) {
-        Bucket *table = tables[i];
+        HashTable *hash_table = tables[i];
+        Bucket *buckets = hash_table->items;
         for (size_t j = 0; j < TABLE_SIZE; j++) {
-            City *cities = table[j].items;
-            for (size_t k = 0; k < table[j].count; k++) {
+            Bucket *bucket = &buckets[j];
+            const City *cities = bucket->items;
+            for (size_t k = 0; k < bucket->count; k++) {
                 join_entry(result, &cities[k]);
+                free(cities[k].key);
             }
+            z_da_free(bucket);
         }
-        z_da_free(table);
+        free(hash_table);
     }
     return result;
 }
@@ -133,7 +133,7 @@ int comp_func(const void *a, const void *b) {
     return strcmp(city_a->key, city_b->key);
 }
 
-void extract_key_value_pairs(Bucket *hash_table, size_t start, size_t end, const char *buffer,
+void extract_key_value_pairs(HashTable *hash_table, size_t start, size_t end, const char *buffer,
                              size_t upper_boundary) {
     size_t len = 0;
     if (start > 0) {
@@ -189,7 +189,7 @@ typedef struct {
 } WorkerArgs;
 
 void *worker(void *arg) {
-    Bucket *hash_table = calloc(TABLE_SIZE, sizeof(Bucket));
+    HashTable *hash_table = calloc(1, sizeof(HashTable));
     const WorkerArgs *args = (WorkerArgs *) arg;
     extract_key_value_pairs(hash_table, args->start, args->end, args->buffer, args->upper_boundary);
     return hash_table;
@@ -201,7 +201,7 @@ int usage(char **argv) {
 }
 
 int main(int argc, char **argv) {
-    if (argc<2) {
+    if (argc < 2) {
         return usage(argv);
     }
     FILE *in = fopen(argv[1], "r");
@@ -211,7 +211,7 @@ int main(int argc, char **argv) {
     }
 
     fseek(in, 0, SEEK_END);
-    size_t file_end = ftell(in);
+    const size_t file_end = ftell(in);
     fseek(in, 0, SEEK_SET);
     size_t read = 0;
     char *buffer = malloc(file_end + 1);
@@ -223,26 +223,28 @@ int main(int argc, char **argv) {
         exit(1);
     }
 
-    unsigned long long t_total_start = now_ns();
+    const unsigned long long t_total_start = now_ns();
 
     WorkerArgs args[WORKERS];
-    pthread_t threads[WORKERS];
+    pthread_t *threads[WORKERS];
     for (int i = 0; i < WORKERS; i++) {
         args[i].start = file_end / WORKERS * (i);
         args[i].end = args[i].start;
         args[i].buffer = buffer;
         args[i].upper_boundary = file_end / WORKERS * (i + 1);
-        threads[i] = *z_create_thread(worker, &args[i]);
+        threads[i] = z_create_thread(worker, &args[i]);
     }
 
-    Bucket *tables[WORKERS];
+    HashTable **tables = malloc(WORKERS * sizeof(HashTable *));
+    assert(tables != NULL);
     for (int i = 0; i < WORKERS; i++) {
-        tables[i] = (Bucket *) z_join_thread(&threads[i]);
+        tables[i] = z_join_thread(threads[i]);
+        z_free_thread(threads[i]);
     }
-
     free(buffer);
 
     Bucket *table = join_tables(tables, WORKERS);
+    free(tables);
 
     City *list[num_cities];
 
@@ -255,19 +257,22 @@ int main(int argc, char **argv) {
             }
         }
     }
-    free(table);
-
     qsort(list, num_cities, sizeof(list[0]), comp_func);
     StringBuffer output = {0};
     z_da_reserve(&output, TABLE_SIZE);
     for (int i = 0; i < num_cities; i++) {
         print_city(list[i], &output);
+        free(list[i]->key);
     }
+
 
     output.count -= 2;
     z_da_append(&output, '\0');
     printf("{%s}\n", output.items);
     z_da_free(&output);
+
+    z_da_free(table);
+    free(table);
 
     const unsigned long long t_total_end = now_ns();
     const double total_ms = (t_total_end - t_total_start) / 1e6;

@@ -1,7 +1,3 @@
-//
-// Created by zimmer on 9/7/25.
-//
-
 #ifndef Z_UTILS_H
 #define Z_UTILS_H
 
@@ -29,7 +25,9 @@
                 (da)->capacity *= 2;                                                                                    \
             }                                                                                                           \
             (da)->items = realloc((da)->items, ((da)->capacity) * sizeof(*(da)->items));                                \
-            assert((*(void **) &(da)->items) != NULL && "Cannot allocate memory for dynamic array");                    \
+            if ((*(void **) &(da)->items) == NULL) {                                                                    \
+                printf("%s[%d] %s: Cannot allocate memory for dynamic array", __FILE__, __LINE__, __ASSERT_FUNCTION);   \
+            }                                                                                                           \
         }                                                                                                               \
     }                                                                                                                   \
     while(0)
@@ -39,6 +37,7 @@
         z_da_reserve((da), (new_size));                                                                                 \
         (da)->count = (new_size);                                                                                       \
     } while (0)
+
 #define z_da_append_many(da, new_items, new_items_count)                                                                \
     do {                                                                                                                \
         size_t _z_da_n = (size_t)(new_items_count);                                                                     \
@@ -51,21 +50,28 @@
 
 #define z_da_append_null(da) z_da_append((da), '\0')
 #define z_da_append_cstr(da, text) z_da_append_many((da), (text), strlen((const char*)(text)))
-#define z_da_free(da) free((da)->items)
+#define z_free(item) free(item); (item) = nullptr
+#define z_da_free(da) z_free((da)->items); (da)->capacity = 0; (da)->count = 0
 
 pthread_t *z_create_thread(void *(*func)(void *), void *arg);
-void* z_join_thread(const pthread_t *thread);
-#define z_free_thread(thread) free(thread)
 
+void *z_join_thread(const pthread_t *thread);
+
+#define z_free_thread(thread) z_free(thread)
+
+unsigned long long now_ns(void);
+
+#ifdef Z_UTILS_IMPLEMENTATION
 #include <time.h>
-unsigned long long now_ns(void) {
+
+inline unsigned long long now_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
+    return (unsigned long long) ts.tv_sec * 1000000000ull + (unsigned long long) ts.tv_nsec;
 }
 
 
-pthread_t *z_create_thread(void *(*func)(void *), void *arg) {
+inline pthread_t *z_create_thread(void *(*func)(void *), void *arg) {
     pthread_t *thread = malloc(sizeof(pthread_t));
     if (pthread_create(thread, NULL, func, arg) == 0) {
         return thread;
@@ -74,10 +80,12 @@ pthread_t *z_create_thread(void *(*func)(void *), void *arg) {
     return nullptr;
 }
 
-void* z_join_thread(const pthread_t *thread) {
+inline void *z_join_thread(const pthread_t *thread) {
     void *ret = nullptr;
     pthread_join(*thread, &ret);
     return ret;
 }
+
+#endif //Z_UTILS_IMPLEMENTATION
 
 #endif //Z_UTILS_H
